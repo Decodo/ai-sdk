@@ -1,7 +1,7 @@
 # Decodo tools for the Vercel AI SDK
 
-[Vercel AI SDK](https://ai-sdk.dev) tools for the Decodo Web Data API: scrape the web from any
-model.
+[Vercel AI SDK](https://ai-sdk.dev) tools for the Decodo Web Data API: scrape, search and map
+the web from any model.
 
 ## Install
 
@@ -39,6 +39,8 @@ console.log(text);
 | Tool | What the model gets |
 |---|---|
 | `scrape` | One page as Markdown, cut at 45,000 characters with `truncated` and `totalLength` |
+| `search` | Ranked search results |
+| `map` | A site's URLs, 10 by default and at most 500 |
 
 ### Scrape
 
@@ -49,6 +51,30 @@ const { text } = await generateText({
   tools: { scrape },
   stopWhen: stepCountIs(5),
   prompt: 'Scrape https://ip.decodo.com and tell me the country of the IP.',
+});
+```
+
+### Search
+
+```typescript
+const { search } = decodoTools();
+const { text } = await generateText({
+  model: anthropic('claude-sonnet-5-5'),
+  tools: { search },
+  stopWhen: stepCountIs(5),
+  prompt: 'Search the web for what a web data API is and answer in one sentence.',
+});
+```
+
+### Map
+
+```typescript
+const { map } = decodoTools();
+const { text } = await generateText({
+  model: anthropic('claude-sonnet-5-5'),
+  tools: { map },
+  stopWhen: stepCountIs(5),
+  prompt: 'List 20 URLs from https://decodo.com.',
 });
 ```
 

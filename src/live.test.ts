@@ -15,9 +15,21 @@ describe.skipIf(!apiKey)('live', { timeout: 180_000 }, () => {
     expect(output.content.length).toBeGreaterThan(0);
   });
 
+  it('searches', async () => {
+    const output = await run<{ organic?: unknown[] }>(tools.search, { query: 'decodo' });
+
+    expect(output.organic?.length).toBeGreaterThan(0);
+  });
+
+  it('maps a site', async () => {
+    const output = await run<{ urls: string[] }>(tools.map, { url: 'https://decodo.com', limit: 5 });
+
+    expect(output.urls.length).toBeGreaterThan(0);
+  });
+
   it('turns a rejected key into a readable error', async () => {
     const rejected = decodoTools({ apiKey: 'not-a-real-key' });
 
-    await expect(run(rejected.scrape, { url: 'https://ip.decodo.com' })).rejects.toThrow(/DECODO_API_KEY/);
+    await expect(run(rejected.search, { query: 'decodo' })).rejects.toThrow(/DECODO_API_KEY/);
   });
 });
