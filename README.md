@@ -1,6 +1,6 @@
 # Decodo tools for the Vercel AI SDK
 
-[Vercel AI SDK](https://ai-sdk.dev) tools for the Decodo Web Data API: scrape, search and map
+[Vercel AI SDK](https://ai-sdk.dev) tools for the Decodo Web Data API: scrape, search, map and crawl
 the web from any model.
 
 ## Install
@@ -41,6 +41,17 @@ console.log(text);
 | `scrape` | One page as Markdown, cut at 45,000 characters with `truncated` and `totalLength` |
 | `search` | Ranked search results |
 | `map` | A site's URLs, 10 by default and at most 500 |
+| `crawl_start` | A `crawl_id` right away; crawls 10 pages by default and at most 100 |
+| `crawl_status` | Status and page counts; finished once `status` is no longer `pending` |
+| `crawl_results` | Crawled pages as Markdown, about 45,000 characters per call, with `nextCursor` for the rest |
+| `crawl_cancel` | Stops a crawl; pages crawled so far stay readable |
+
+A crawled page too long for one call is split across calls, and each part carries `contentPart`
+with its character range.
+
+A model polls `crawl_status` by calling it again, and each call uses a step, so give crawling
+prompts a higher `stepCountIs`. While a crawl is pending, `crawl_status` waits 5 seconds before
+answering, which slows polling and keeps a long crawl from using up the steps.
 
 ### Scrape
 
@@ -75,6 +86,18 @@ const { text } = await generateText({
   tools: { map },
   stopWhen: stepCountIs(5),
   prompt: 'List 20 URLs from https://decodo.com.',
+});
+```
+
+### Crawl
+
+```typescript
+const { crawl_start, crawl_status, crawl_results } = decodoTools();
+const { text } = await generateText({
+  model: anthropic('claude-sonnet-5-5'),
+  tools: { crawl_start, crawl_status, crawl_results },
+  stopWhen: stepCountIs(30),
+  prompt: 'Crawl 5 pages of https://decodo.com and summarise what the company sells.',
 });
 ```
 
