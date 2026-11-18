@@ -60,6 +60,24 @@ describe('decodoTools', () => {
   });
 
   it.each([
+    ['a line break', 'secret\npart'],
+    ['a carriage return', 'secret\rpart'],
+    ['a non-Latin-1 character', 'secret\u0142part'],
+  ])('refuses a key with %s without quoting it', (_, key) => {
+    const refusal = (() => {
+      try {
+        decodoTools({ apiKey: key });
+        return '';
+      } catch (err) {
+        return String(err);
+      }
+    })();
+
+    expect(refusal).toMatch(/cannot be sent in a header/);
+    expect(refusal).not.toMatch(/secret|part/);
+  });
+
+  it.each([
     ['scrape', { url: 'https://a.io' }, { results: [{ content: 'x', status_code: 200 }] }],
   ] as const)('%s sends the API key and x-integration', async (name, input, body) => {
     fetchMock.mockResolvedValue(jsonResponse(body));
@@ -159,11 +177,20 @@ describe('errors', () => {
     [401, { message: 'Invalid key' }, /Invalid key.*DECODO_API_KEY/],
     [429, { message: 'Too many' }, /Too many.*Retry later/],
     [422, { message: 'Bad url' }, /Bad url.*Change the input/],
+    [400, { message: 'Invalid URL format.' }, /refused the input: Invalid URL format\. Change the input/],
     [500, { message: 'Boom' }, /500: Boom.*Retry later/],
   ])('maps status %i to a readable message', async (status, body, message) => {
     fetchMock.mockResolvedValue(jsonResponse(body, status));
 
     await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toThrow(message);
+  });
+
+  it('does not blame the input when the target page answers 400', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ results: [{ status_code: 400, help: 'Bad target' }] }));
+
+    await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toThrow(
+      /failed with status 400: Bad target\.$/,
+    );
   });
 
   it('maps a request timeout', async () => {

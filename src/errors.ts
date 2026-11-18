@@ -6,7 +6,13 @@ import {
   ValidationError,
 } from '@decodo/sdk-ts';
 
+export class TargetError extends DecodoError {}
+
 const asSentence = (message: string) => message.replace(/\.+$/, '');
+
+const refusedInput = (err: unknown): err is DecodoError =>
+  err instanceof ValidationError ||
+  (err instanceof DecodoError && err.statusCode === 400 && !(err instanceof TargetError));
 
 const describeError = (err: unknown): string => {
   if (err instanceof AuthenticationError) {
@@ -15,7 +21,7 @@ const describeError = (err: unknown): string => {
   if (err instanceof RateLimitError) {
     return `Decodo rate limit or request quota reached: ${asSentence(err.message)}. Retry later.`;
   }
-  if (err instanceof ValidationError) {
+  if (refusedInput(err)) {
     return `Decodo refused the input: ${asSentence(err.message)}. Change the input before calling again.`;
   }
   if (err instanceof TimeoutError) {

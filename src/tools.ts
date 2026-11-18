@@ -1,16 +1,11 @@
-import {
-  DecodoClient,
-  DecodoError,
-  requestSchemas,
-  Target,
-} from '@decodo/sdk-ts';
+import { DecodoClient, requestSchemas, Target } from '@decodo/sdk-ts';
 import type { TargetParamsMap } from '@decodo/sdk-ts';
 import { tool } from 'ai';
 import type { Tool } from 'ai';
 import * as z from 'zod';
 import { capContent } from './content.js';
 import type { CappedContent } from './content.js';
-import { withReadableErrors } from './errors.js';
+import { TargetError, withReadableErrors } from './errors.js';
 
 const INTEGRATION_HEADER = 'ai-sdk';
 
@@ -40,19 +35,21 @@ const successfulResults = <Result extends { status_code: number; help?: string }
   response: { results?: Result[]; status?: string; message?: string },
 ) => {
   if (response.status === 'failed') {
-    throw new DecodoError(response.message ?? 'The request failed', 502, 'failed');
+    throw new TargetError(response.message ?? 'The request failed', 502, 'failed');
   }
   if (!Array.isArray(response.results) || response.results.length === 0) {
-    throw new DecodoError('The response has no results', 502, 'failed');
+    throw new TargetError('The response has no results', 502, 'failed');
   }
 
   const successful = response.results.filter((result) => result.status_code < 400);
   if (successful.length === 0) {
     const [{ status_code: statusCode, help }] = response.results;
-    throw new DecodoError(help ?? 'The target page could not be fetched', statusCode, 'failed');
+    throw new TargetError(help ?? 'The target page could not be fetched', statusCode, 'failed');
   }
   return successful;
 };
+
+const HEADER_SAFE = /^[\x21-\x7e]+$/;
 
 const resolveApiKey = (apiKey = process.env.DECODO_API_KEY): string => {
   if (!apiKey?.trim()) {
@@ -60,7 +57,13 @@ const resolveApiKey = (apiKey = process.env.DECODO_API_KEY): string => {
       'Decodo API key is missing. Pass apiKey to decodoTools() or set DECODO_API_KEY. Keys are at https://dashboard.decodo.com/web-data/playground.',
     );
   }
-  return apiKey.trim();
+  const key = apiKey.trim();
+  if (!HEADER_SAFE.test(key)) {
+    throw new Error(
+      'Decodo API key has a line break, space or other character that cannot be sent in a header. Copy it again from https://dashboard.decodo.com/web-data/playground.',
+    );
+  }
+  return key;
 };
 
 export const decodoTools = ({ apiKey }: DecodoToolsConfig = {}): DecodoTools => {
