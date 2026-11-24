@@ -5,21 +5,27 @@ import {
   Target,
 } from '@decodo/sdk-ts';
 import type {
+  CancelCrawlResponse,
+  GetCrawlStatusResponse,
   MapSiteRequest,
   RunSearchRequest,
   RunSearchResponse,
+  StartCrawlRequest,
+  StartCrawlResponse,
   TargetParamsMap,
 } from '@decodo/sdk-ts';
 import { tool } from 'ai';
 import type { Tool } from 'ai';
 import * as z from 'zod';
-import { capContent } from './content.js';
-import type { CappedContent } from './content.js';
+import { capContent, readCrawlPages } from './content.js';
+import type { CappedContent, CrawlPagesOutput } from './content.js';
 import { TargetError, withReadableErrors } from './errors.js';
 
 const INTEGRATION_HEADER = 'ai-sdk';
 const DEFAULT_LIMIT = 10;
+const MAX_CRAWL_LIMIT = 100;
 const MAX_MAP_LIMIT = 500;
+const PENDING_CRAWL_WAIT_MS = 5_000;
 
 export type DecodoToolsConfig = {
   apiKey?: string;
@@ -38,11 +44,18 @@ type SiteInputField =
   | 'geo'
   | 'locale';
 type MapInput = Pick<MapSiteRequest, SiteInputField>;
+type CrawlStartInput = Pick<StartCrawlRequest, SiteInputField | 'max_depth'>;
+type CrawlIdInput = { crawl_id: string };
+type CrawlResultsInput = { crawl_id: string; cursor?: string };
 
 export type DecodoTools = {
   scrape: Tool<ScrapeInput, { url: string } & CappedContent>;
   search: Tool<SearchInput, Exclude<RunSearchResponse, { status: 'failed' }>>;
   map: Tool<MapInput, { urls: string[] }>;
+  crawl_start: Tool<CrawlStartInput, Pick<StartCrawlResponse, 'crawl_id' | 'status' | 'url'>>;
+  crawl_status: Tool<CrawlIdInput, GetCrawlStatusResponse>;
+  crawl_results: Tool<CrawlResultsInput, CrawlPagesOutput>;
+  crawl_cancel: Tool<CrawlIdInput, Pick<CancelCrawlResponse, 'crawl_id' | 'status' | 'url'>>;
 };
 
 const siteFields = {
@@ -86,6 +99,13 @@ const mapInput = dataApiRequestSchemas.mapSite
   .pick(siteFields)
   .extend({ limit: limitField('URLs to return', MAX_MAP_LIMIT) })
   .strict() as unknown as z.ZodType<MapInput>;
+
+const crawlStartInput = dataApiRequestSchemas.startCrawl
+  .pick({ ...siteFields, max_depth: true })
+  .extend({ limit: limitField('pages to crawl', MAX_CRAWL_LIMIT) })
+  .strict() as unknown as z.ZodType<CrawlStartInput>;
+
+const crawlIdField = z.string().min(1).describe('Crawl id returned by crawl_start.');
 
 const successfulResults = <Result extends { status_code: number; help?: string }>(
   response: { results?: Result[]; status?: string; message?: string },
@@ -167,6 +187,70 @@ export const decodoTools = ({ apiKey }: DecodoToolsConfig = {}): DecodoTools => 
           await api.map({ ...input, limit: limit ?? DEFAULT_LIMIT }),
         );
         return { urls: results.flatMap(({ content }) => content.links.map(({ url }) => url)) };
+      }),
+    }),
+
+    crawl_start: tool({
+      description:
+        'Start crawling a website and return its crawl_id right away, without waiting for it to finish. ' +
+        'Check progress with crawl_status, then read pages with crawl_results. Stop it early with crawl_cancel. ' +
+        'For precise work, prefer map plus scrape on the pages you need.',
+      inputSchema: crawlStartInput,
+      execute: withReadableErrors(async ({ limit, ...input }: CrawlStartInput) => {
+        const { crawl_id, status, url } = await api.startCrawl({
+          ...input,
+          limit: limit ?? DEFAULT_LIMIT,
+          output: 'markdown',
+        });
+        return { crawl_id, status, url };
+      }),
+    }),
+
+    crawl_status: tool({
+      description:
+        'Report the progress of a crawl started with crawl_start: its status and how many pages were discovered, completed and failed. ' +
+        'The crawl is finished once status is no longer "pending". ' +
+        'While it is pending this tool waits a few seconds before answering, so call it again right away.',
+      inputSchema: z.object({ crawl_id: crawlIdField }).strict(),
+      execute: withReadableErrors(async ({ crawl_id }: CrawlIdInput) => {
+        const status = await api.getCrawlStatus(crawl_id);
+        if (status.status === 'pending') {
+          await new Promise((resolve) => setTimeout(resolve, PENDING_CRAWL_WAIT_MS));
+        }
+        return status;
+      }),
+    }),
+
+    crawl_results: tool({
+      description:
+        'Return crawled pages as Markdown from a crawl started with crawl_start, about 45,000 characters per call. ' +
+        'Call it once crawl_status reports the crawl is no longer "pending". ' +
+        'Pass nextCursor back to get more; when it is missing, you have every page. ' +
+        'A page too long for one call is split across calls; each part carries contentPart with its character range.',
+      inputSchema: z
+        .object({
+          crawl_id: crawlIdField,
+          cursor: z
+            .string()
+            .optional()
+            .describe('nextCursor from a previous crawl_results call; omit for the first pages.'),
+        })
+        .strict(),
+      execute: withReadableErrors(({ crawl_id, cursor }: CrawlResultsInput) =>
+        readCrawlPages(cursor, (upstreamCursor) =>
+          api.listCrawlPages(crawl_id, { cursor: upstreamCursor }),
+        ),
+      ),
+    }),
+
+    crawl_cancel: tool({
+      description:
+        'Stop a crawl started with crawl_start so it crawls no more pages. ' +
+        'Pages crawled before the cancel stay readable with crawl_results.',
+      inputSchema: z.object({ crawl_id: crawlIdField }).strict(),
+      execute: withReadableErrors(async ({ crawl_id }: CrawlIdInput) => {
+        const { crawl_id: id, status, url } = await api.cancelCrawl(crawl_id);
+        return { crawl_id: id, status, url };
       }),
     }),
   };

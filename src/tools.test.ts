@@ -27,6 +27,18 @@ const run = async <Input, Output>(
 ): Promise<Output> =>
   (executable.execute as (input: Input, options: unknown) => Promise<Output>)(input, {});
 
+const crawlPage = (url: string, content?: string) => ({
+  url,
+  content,
+  depth: 0,
+  status: 'done',
+  created_at: '',
+  updated_at: '',
+  crawl_status: '',
+  results_tasks: '',
+  results_content: '',
+});
+
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
@@ -35,11 +47,16 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 describe('decodoTools', () => {
-  it('returns the scrape, search and map tools', () => {
+  it('returns the seven tools', () => {
     expect(Object.keys(decodoTools({ apiKey: API_KEY })).sort()).toEqual([
+      'crawl_cancel',
+      'crawl_results',
+      'crawl_start',
+      'crawl_status',
       'map',
       'scrape',
       'search',
@@ -48,9 +65,9 @@ describe('decodoTools', () => {
 
   it('falls back to DECODO_API_KEY', async () => {
     vi.stubEnv('DECODO_API_KEY', 'env-key');
-    fetchMock.mockResolvedValue(jsonResponse({ results: [{ content: 'x', status_code: 200 }] }));
+    fetchMock.mockResolvedValue(jsonResponse({ status: 'done' }));
 
-    await run(decodoTools().scrape, { url: 'https://a.io' });
+    await run(decodoTools().crawl_status, { crawl_id: 'c1' });
 
     expect(lastRequest().headers.Authorization).toBe('Bearer env-key');
   });
@@ -83,6 +100,10 @@ describe('decodoTools', () => {
     ['scrape', { url: 'https://a.io' }, { results: [{ content: 'x', status_code: 200 }] }],
     ['search', { query: 'q' }, { status: 'done', organic: [] }],
     ['map', { url: 'https://a.io' }, { results: [{ content: { links: [] }, status_code: 200 }] }],
+    ['crawl_start', { url: 'https://a.io' }, { crawl_id: 'c1', status: 'pending', url: 'x' }],
+    ['crawl_status', { crawl_id: 'c1' }, { status: 'done' }],
+    ['crawl_results', { crawl_id: 'c1' }, { crawl_id: 'c1', url: [] }],
+    ['crawl_cancel', { crawl_id: 'c1' }, { crawl_id: 'c1', status: 'cancelled', url: 'x' }],
   ] as const)('%s sends the API key and x-integration', async (name, input, body) => {
     fetchMock.mockResolvedValue(jsonResponse(body));
 
@@ -103,6 +124,11 @@ describe('input schemas', () => {
     ['scrape', {}],
     ['search', { query: 'q', url: 'https://evil.io' }],
     ['map', { url: 'https://a.io', limit: 501 }],
+    ['crawl_start', { url: 'https://a.io', callback_url: 'https://evil.io' }],
+    ['crawl_start', { url: 'https://a.io', limit: 101 }],
+    ['crawl_status', {}],
+    ['crawl_results', {}],
+    ['crawl_cancel', {}],
   ] as const)('%s refuses %j', (name, input) => {
     const schema = tools[name].inputSchema as z.ZodType;
 
@@ -110,7 +136,7 @@ describe('input schemas', () => {
   });
 
   it('exposes JSON schemas a model can read', () => {
-    const schema = z.toJSONSchema(tools.map.inputSchema as z.ZodType, {
+    const schema = z.toJSONSchema(tools.crawl_start.inputSchema as z.ZodType, {
       target: 'draft-7',
       io: 'input',
     });
@@ -205,6 +231,205 @@ describe('search and map', () => {
     });
     expect(lastRequest().url.pathname).toBe('/v1/map');
     expect(lastRequest().body.limit).toBe(10);
+  });
+});
+
+describe('crawl', () => {
+  const tools = decodoTools({ apiKey: API_KEY });
+
+  it('crawl_start returns at once with the id, bounded and in markdown', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ crawl_id: 'c1', status: 'pending', url: 'https://a.io', crawl_status: 'x' }),
+    );
+
+    await expect(run(tools.crawl_start, { url: 'https://a.io' })).resolves.toEqual({
+      crawl_id: 'c1',
+      status: 'pending',
+      url: 'https://a.io',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastRequest().url.pathname).toBe('/v1/crawl');
+    expect(lastRequest().body).toEqual({
+      url: 'https://a.io',
+      limit: 10,
+      output: 'markdown',
+    });
+  });
+
+  it('crawl_status reads the status route', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ status: 'done', completed: 2 }));
+
+    await expect(run(tools.crawl_status, { crawl_id: 'c1' })).resolves.toEqual({
+      status: 'done',
+      completed: 2,
+    });
+    expect(lastRequest().url.pathname).toBe('/v1/crawl/c1/status');
+  });
+
+  it('crawl_status waits before answering while the crawl is pending', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(jsonResponse({ status: 'pending' }));
+
+    const onAnswer = vi.fn();
+    const answer = run(tools.crawl_status, { crawl_id: 'c1' }).then(onAnswer);
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onAnswer).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    await answer;
+    expect(onAnswer).toHaveBeenCalledWith({ status: 'pending' });
+  });
+
+  it('crawl_results walks every page without losing any across the size cap', async () => {
+    const upstream: Record<string, unknown> = {
+      '': {
+        crawl_id: 'c1',
+        total: 3,
+        url: [crawlPage('https://a.io/1', 'a'.repeat(30_000)), crawlPage('https://a.io/2', 'b'.repeat(30_000))],
+        next: 'https://data.decodo.com/v1/crawl/c1?cursor=up2',
+      },
+      up2: { crawl_id: 'c1', url: [crawlPage('https://a.io/3', 'c')] },
+    };
+    fetchMock.mockImplementation(async (url) =>
+      jsonResponse(upstream[new URL(url as string).searchParams.get('cursor') ?? '']),
+    );
+
+    type Output = { pages: { url: string }[]; nextCursor?: string; total?: number };
+    const first = await run<object, Output>(tools.crawl_results, { crawl_id: 'c1' });
+    const second = await run<object, Output>(tools.crawl_results, {
+      crawl_id: 'c1',
+      cursor: first.nextCursor,
+    });
+    const third = await run<object, Output>(tools.crawl_results, {
+      crawl_id: 'c1',
+      cursor: second.nextCursor,
+    });
+
+    expect(first.total).toBe(3);
+    expect(first.pages.map(({ url }) => url)).toEqual(['https://a.io/1']);
+    expect(second.pages.map(({ url }) => url)).toEqual(['https://a.io/2']);
+    expect(third.pages.map(({ url }) => url)).toEqual(['https://a.io/3']);
+    expect(third.nextCursor).toBeUndefined();
+    expect(lastRequest().url.searchParams.get('type')).toBe('content');
+  });
+
+  it('crawl_results splits a page too long for one call and loses nothing', async () => {
+    const long = `${'a'.repeat(44_000)}😀${'b'.repeat(60_000)}`;
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        crawl_id: 'c1',
+        total: 2,
+        url: [crawlPage('https://a.io/1', long), crawlPage('https://a.io/2', 'short')],
+      }),
+    );
+
+    type Page = {
+      url: string;
+      content: string;
+      contentPart?: { start: number; end: number; totalLength: number };
+    };
+    const seen: Page[] = [];
+    let cursor: string | undefined;
+    let calls = 0;
+    do {
+      const output: { pages: Page[]; nextCursor?: string } = await run(tools.crawl_results, {
+        crawl_id: 'c1',
+        cursor,
+      });
+      seen.push(...output.pages);
+      cursor = output.nextCursor;
+      calls += 1;
+    } while (cursor && calls < 10);
+
+    const parts = seen.filter(({ url }) => url === 'https://a.io/1');
+    expect(cursor).toBeUndefined();
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.map(({ content }) => content).join('')).toBe(long);
+    expect(parts.every(({ content }) => content.length <= 45_000)).toBe(true);
+    expect(parts.every(({ content }) => !/[\uD800-\uDBFF]$/.test(content))).toBe(true);
+    expect(parts[1].contentPart?.start).toBe(parts[0].contentPart?.end);
+    expect(parts.at(-1)?.contentPart?.end).toBe(long.length);
+    expect(parts[0].contentPart?.totalLength).toBe(long.length);
+    expect(seen.at(-1)).toMatchObject({ url: 'https://a.io/2', content: 'short' });
+    expect(seen.at(-1)?.contentPart).toBeUndefined();
+  });
+
+  it('crawl_results stops once every page in total was returned', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        crawl_id: 'c1',
+        total: 1,
+        url: [crawlPage('https://a.io/1', 'a')],
+        next: 'https://data.decodo.com/v1/crawl/c1?cursor=up2',
+      }),
+    );
+
+    const { nextCursor } = await run<object, { nextCursor?: string }>(tools.crawl_results, {
+      crawl_id: 'c1',
+    });
+
+    expect(nextCursor).toBeUndefined();
+  });
+
+  it('crawl_results refuses a cursor it did not issue', async () => {
+    await expect(
+      run(tools.crawl_results, { crawl_id: 'c1', cursor: 'nonsense' }),
+    ).rejects.toThrow(/Invalid cursor/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('crawl_results treats an empty cursor as the start', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ crawl_id: 'c1', url: [crawlPage('https://a.io/1', 'a')] }),
+    );
+
+    const { pages } = await run<object, { pages: unknown[] }>(tools.crawl_results, {
+      crawl_id: 'c1',
+      cursor: '',
+    });
+
+    expect(pages).toHaveLength(1);
+  });
+
+  it('crawl_results moves forward when content_error fills the budget', async () => {
+    const contentError = 'e'.repeat(60_000);
+    const content = 'a'.repeat(2_500);
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        crawl_id: 'c1',
+        url: [{ ...crawlPage('https://a.io/1', content), content_error: contentError }],
+      }),
+    );
+
+    type Output = { pages: { content: string; content_error?: string }[]; nextCursor?: string };
+    const parts: Output['pages'] = [];
+    let cursor: string | undefined;
+    let calls = 0;
+    do {
+      const output: Output = await run(tools.crawl_results, { crawl_id: 'c1', cursor });
+      parts.push(...output.pages);
+      cursor = output.nextCursor;
+      calls += 1;
+    } while (cursor && calls < 10);
+
+    expect(cursor).toBeUndefined();
+    expect(parts.map((part) => part.content).join('')).toBe(content);
+    expect(parts[0].content_error).toBe(contentError);
+  });
+
+  it('crawl_cancel posts to the cancel route', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ crawl_id: 'c1', status: 'cancelled', url: 'https://a.io', crawl_status: 'x' }),
+    );
+
+    await expect(run(tools.crawl_cancel, { crawl_id: 'c1' })).resolves.toEqual({
+      crawl_id: 'c1',
+      status: 'cancelled',
+      url: 'https://a.io',
+    });
+    expect(lastRequest().url.pathname).toBe('/v1/crawl/c1/cancel');
+    expect(lastRequest().method).toBe('POST');
   });
 });
 
@@ -307,9 +532,9 @@ describe('with generateText', () => {
 
     expect(result.text).toBe('done');
     expect(result.steps[0].toolResults[0].output).toMatchObject({ content: '# Hi' });
-    const map = seenTools[0].find(({ name }) => name === 'map');
-    expect(Object.keys(map?.inputSchema.properties ?? {})).toContain('select_paths');
-    expect(Object.keys(map?.inputSchema.properties ?? {})).not.toContain('callback_url');
+    const crawlStart = seenTools[0].find(({ name }) => name === 'crawl_start');
+    expect(Object.keys(crawlStart?.inputSchema.properties ?? {})).toContain('max_depth');
+    expect(Object.keys(crawlStart?.inputSchema.properties ?? {})).not.toContain('callback_url');
   });
 
   it('hands a rejected key back to the model instead of crashing', async () => {
@@ -329,7 +554,7 @@ describe('with generateText', () => {
   });
 
   it('refuses a callback_url the model made up before any request', async () => {
-    const { model } = modelCalling('map', {
+    const { model } = modelCalling('crawl_start', {
       url: 'https://a.io',
       callback_url: 'https://evil.io',
     });
@@ -338,7 +563,7 @@ describe('with generateText', () => {
       model,
       tools: decodoTools({ apiKey: API_KEY }),
       stopWhen: stepCountIs(3),
-      prompt: 'Map it',
+      prompt: 'Crawl it',
     });
 
     expect(result.text).toBe('done');
