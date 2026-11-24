@@ -38,9 +38,11 @@ afterEach(() => {
 });
 
 describe('decodoTools', () => {
-  it('returns the scrape tool', () => {
+  it('returns the scrape, search and map tools', () => {
     expect(Object.keys(decodoTools({ apiKey: API_KEY })).sort()).toEqual([
+      'map',
       'scrape',
+      'search',
     ]);
   });
 
@@ -79,6 +81,8 @@ describe('decodoTools', () => {
 
   it.each([
     ['scrape', { url: 'https://a.io' }, { results: [{ content: 'x', status_code: 200 }] }],
+    ['search', { query: 'q' }, { status: 'done', organic: [] }],
+    ['map', { url: 'https://a.io' }, { results: [{ content: { links: [] }, status_code: 200 }] }],
   ] as const)('%s sends the API key and x-integration', async (name, input, body) => {
     fetchMock.mockResolvedValue(jsonResponse(body));
 
@@ -97,6 +101,8 @@ describe('input schemas', () => {
   it.each([
     ['scrape', { url: 'https://a.io', callback_url: 'https://evil.io' }],
     ['scrape', {}],
+    ['search', { query: 'q', url: 'https://evil.io' }],
+    ['map', { url: 'https://a.io', limit: 501 }],
   ] as const)('%s refuses %j', (name, input) => {
     const schema = tools[name].inputSchema as z.ZodType;
 
@@ -104,7 +110,7 @@ describe('input schemas', () => {
   });
 
   it('exposes JSON schemas a model can read', () => {
-    const schema = z.toJSONSchema(tools.scrape.inputSchema as z.ZodType, {
+    const schema = z.toJSONSchema(tools.map.inputSchema as z.ZodType, {
       target: 'draft-7',
       io: 'input',
     });
@@ -170,6 +176,38 @@ describe('scrape', () => {
   });
 });
 
+describe('search and map', () => {
+  const tools = decodoTools({ apiKey: API_KEY });
+
+  it('search calls /v1/search', async () => {
+    const body = { status: 'done', organic: [{ title: 't', link: 'l' }] };
+    fetchMock.mockResolvedValue(jsonResponse(body));
+
+    await expect(run(tools.search, { query: 'q' })).resolves.toEqual(body);
+    expect(lastRequest().url.pathname).toBe('/v1/search');
+  });
+
+  it('search surfaces a failed envelope', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ status: 'failed', message: 'Bad query' }));
+
+    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(/Bad query/);
+  });
+
+  it('map defaults the limit and returns plain URLs', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        results: [{ content: { links: [{ url: 'https://a.io/1' }] }, status_code: 200 }],
+      }),
+    );
+
+    await expect(run(tools.map, { url: 'https://a.io' })).resolves.toEqual({
+      urls: ['https://a.io/1'],
+    });
+    expect(lastRequest().url.pathname).toBe('/v1/map');
+    expect(lastRequest().body.limit).toBe(10);
+  });
+});
+
 describe('errors', () => {
   const tools = decodoTools({ apiKey: API_KEY });
 
@@ -182,7 +220,7 @@ describe('errors', () => {
   ])('maps status %i to a readable message', async (status, body, message) => {
     fetchMock.mockResolvedValue(jsonResponse(body, status));
 
-    await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toThrow(message);
+    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(message);
   });
 
   it('does not blame the input when the target page answers 400', async () => {
@@ -196,20 +234,20 @@ describe('errors', () => {
   it('maps a request timeout', async () => {
     fetchMock.mockRejectedValue(new DOMException('Aborted', 'AbortError'));
 
-    await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toThrow(/did not answer in time/);
+    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(/did not answer in time/);
   });
 
   it('does not double the period of an SDK message', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ message: 'Invalid key.' }, 401));
 
-    await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toThrow(/Invalid key\. Check/);
+    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(/Invalid key\. Check/);
   });
 
   it('keeps the original error as the cause', async () => {
     const failure = new TypeError('fetch failed');
     fetchMock.mockRejectedValue(failure);
 
-    await expect(run(tools.scrape, { url: 'https://a.io' })).rejects.toMatchObject({
+    await expect(run(tools.search, { query: 'q' })).rejects.toMatchObject({
       message: expect.stringContaining('fetch failed'),
       cause: failure,
     });
@@ -269,14 +307,14 @@ describe('with generateText', () => {
 
     expect(result.text).toBe('done');
     expect(result.steps[0].toolResults[0].output).toMatchObject({ content: '# Hi' });
-    const scrape = seenTools[0].find(({ name }) => name === 'scrape');
-    expect(Object.keys(scrape?.inputSchema.properties ?? {})).toContain('geo');
-    expect(Object.keys(scrape?.inputSchema.properties ?? {})).not.toContain('callback_url');
+    const map = seenTools[0].find(({ name }) => name === 'map');
+    expect(Object.keys(map?.inputSchema.properties ?? {})).toContain('select_paths');
+    expect(Object.keys(map?.inputSchema.properties ?? {})).not.toContain('callback_url');
   });
 
   it('hands a rejected key back to the model instead of crashing', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ message: 'Invalid key' }, 401));
-    const { model } = modelCalling('scrape', { url: 'https://a.io' });
+    const { model } = modelCalling('search', { query: 'q' });
 
     const result = await generateText({
       model,
@@ -291,7 +329,7 @@ describe('with generateText', () => {
   });
 
   it('refuses a callback_url the model made up before any request', async () => {
-    const { model } = modelCalling('scrape', {
+    const { model } = modelCalling('map', {
       url: 'https://a.io',
       callback_url: 'https://evil.io',
     });
@@ -300,7 +338,7 @@ describe('with generateText', () => {
       model,
       tools: decodoTools({ apiKey: API_KEY }),
       stopWhen: stepCountIs(3),
-      prompt: 'Read it',
+      prompt: 'Map it',
     });
 
     expect(result.text).toBe('done');
