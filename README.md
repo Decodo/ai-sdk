@@ -136,7 +136,9 @@ A failed call reaches the model as a tool error it can read and act on, and `gen
 running:
 
 - A rejected API key names `DECODO_API_KEY`.
-- Rate limits, timeouts and 5xx answers say to retry later.
+- Rate limits and 5xx answers say to retry later.
+- A timeout says to retry later, except on `scrape` and `crawl_start`: the request may
+  still have run, so the model is told not to send it again unless asked.
 - Validation errors say to change the input.
 - A page that could not be scraped is an error, even when the API answered 200.
 

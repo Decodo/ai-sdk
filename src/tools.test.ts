@@ -459,7 +459,21 @@ describe('errors', () => {
   it('maps a request timeout', async () => {
     fetchMock.mockRejectedValue(new DOMException('Aborted', 'AbortError'));
 
-    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(/did not answer in time/);
+    await expect(run(tools.search, { query: 'q' })).rejects.toThrow(
+      /did not answer in time.*Retry later\.$/,
+    );
+  });
+
+  it.each([
+    ['scrape', { url: 'https://a.io' }],
+    ['crawl_start', { url: 'https://a.io' }],
+  ] as const)('does not tell the model to resend %s after a timeout', async (name, input) => {
+    fetchMock.mockRejectedValue(new DOMException('Aborted', 'AbortError'));
+
+    const failure = await run(tools[name], input).catch(String);
+
+    expect(failure).toMatch(/did not answer in time.*do not send it again/);
+    expect(failure).not.toMatch(/Retry later/);
   });
 
   it('does not double the period of an SDK message', async () => {
