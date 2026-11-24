@@ -19,7 +19,7 @@ import type { Tool } from 'ai';
 import * as z from 'zod';
 import { capContent, readCrawlPages } from './content.js';
 import type { CappedContent, CrawlPagesOutput } from './content.js';
-import { TargetError, withReadableErrors } from './errors.js';
+import { DO_NOT_RESEND, TargetError, withReadableErrors } from './errors.js';
 
 const INTEGRATION_HEADER = 'ai-sdk';
 const DEFAULT_LIMIT = 10;
@@ -160,7 +160,7 @@ export const decodoTools = ({ apiKey }: DecodoToolsConfig = {}): DecodoTools => 
         const content =
           typeof result.content === 'string' ? result.content : JSON.stringify(result.content);
         return { url: result.url ?? input.url, ...capContent(content) };
-      }),
+      }, DO_NOT_RESEND),
     }),
 
     search: tool({
@@ -203,7 +203,7 @@ export const decodoTools = ({ apiKey }: DecodoToolsConfig = {}): DecodoTools => 
           output: 'markdown',
         });
         return { crawl_id, status, url };
-      }),
+      }, DO_NOT_RESEND),
     }),
 
     crawl_status: tool({

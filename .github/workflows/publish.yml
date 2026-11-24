@@ -49,6 +49,15 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Check the packed package installs and imports
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          cd "$(mktemp -d)"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP"/decodo-ai-sdk-*.tgz ai
+          node -e "import('@decodo/ai-sdk').then(({ decodoTools }) => decodoTools({ apiKey: 'check' }))"
+          node -e "require('@decodo/ai-sdk').decodoTools({ apiKey: 'check' })"
+
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

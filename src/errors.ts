@@ -8,13 +8,17 @@ import {
 
 export class TargetError extends DecodoError {}
 
+const RETRY_LATER = 'Retry later.';
+export const DO_NOT_RESEND =
+  'The request may still have run, so do not send it again unless asked.';
+
 const asSentence = (message: string) => message.replace(/\.+$/, '');
 
 const refusedInput = (err: unknown): err is DecodoError =>
   err instanceof ValidationError ||
   (err instanceof DecodoError && err.statusCode === 400 && !(err instanceof TargetError));
 
-const describeError = (err: unknown): string => {
+const describeError = (err: unknown, afterTimeout: string): string => {
   if (err instanceof AuthenticationError) {
     return `Decodo rejected the API key: ${asSentence(err.message)}. Check DECODO_API_KEY; keys are at https://dashboard.decodo.com/web-data/playground.`;
   }
@@ -25,7 +29,7 @@ const describeError = (err: unknown): string => {
     return `Decodo refused the input: ${asSentence(err.message)}. Change the input before calling again.`;
   }
   if (err instanceof TimeoutError) {
-    return `Decodo did not answer in time: ${asSentence(err.message)}. Retry later.`;
+    return `Decodo did not answer in time: ${asSentence(err.message)}. ${afterTimeout}`;
   }
   if (err instanceof DecodoError) {
     const retry = err.statusCode >= 500 ? ' Retry later.' : '';
@@ -35,11 +39,11 @@ const describeError = (err: unknown): string => {
 };
 
 export const withReadableErrors =
-  <Input, Output>(execute: (input: Input) => Promise<Output>) =>
+  <Input, Output>(execute: (input: Input) => Promise<Output>, afterTimeout = RETRY_LATER) =>
   async (input: Input): Promise<Output> => {
     try {
       return await execute(input);
     } catch (err) {
-      throw new Error(describeError(err), { cause: err });
+      throw new Error(describeError(err, afterTimeout), { cause: err });
     }
   };
